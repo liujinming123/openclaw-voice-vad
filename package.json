@@ -1,0 +1,18 @@
+{
+  "name": "@liujinming/voice-vad",
+  "version": "1.0.0",
+  "description": "Voice Activity Detection plugin for OpenClaw",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node test/vad.test.js"
+  },
+  "dependencies": {
+    "webrtc-vad": "^2.0.13"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
