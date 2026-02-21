@@ -35,8 +35,8 @@ const CONFIG = {
   sampleRate: 16000,
   
   // VAD
-  silenceTimeout: 1500,  // ms of silence before stopping (reduced from 2000)
-  maxRecordingTime: 5000,  // max recording time (reduced from 10000 for faster response)
+  silenceTimeout: 1000,  // ms of silence before stopping
+  maxRecordingTime: 5000,  // max recording time
   
   // Wake word
   wakeWord: "柳如烟",
