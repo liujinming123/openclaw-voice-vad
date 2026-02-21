@@ -77,10 +77,10 @@ async function isAudioAvailable(): Promise<boolean> {
  * Record audio with VAD-based silence detection
  */
 async function recordAudio(outputPath: string, maxDuration: number = CONFIG.maxRecordingTime): Promise<void> {
-  log(`Starting recording: ${outputPath}, max duration: ${maxDuration}ms`);
+  log(`Starting recording: ${outputPath}, max: ${maxDuration}ms`);
   
   return new Promise((resolve, reject) => {
-    // Use ffmpeg to record and monitor audio level
+    // Start recording
     const args = [
       '-y',
       '-f', 'pulse',
@@ -96,32 +96,51 @@ async function recordAudio(outputPath: string, maxDuration: number = CONFIG.maxR
       env: { ...process.env, PULSE_SERVER: CONFIG.pulseServer }
     });
 
+    // Start volume monitor in parallel
+    const monitorProc = spawn('ffmpeg', [
+      '-f', 'pulse',
+      '-i', 'default',
+      '-af', 'volumedetect',
+      '-f', 'null',
+      '-'
+    ], {
+      env: { ...process.env, PULSE_SERVER: CONFIG.pulseServer }
+    });
+
     let silenceStartTime = 0;
+    let hasAudioRecently = false;
     
-    proc.stderr.on('data', (data: Buffer) => {
+    // Monitor volume
+    monitorProc.stderr.on('data', (data: Buffer) => {
       const text = data.toString();
-      // Parse audio size from ffmpeg output: "size= 123kB time=00:00:01.23"
-      const sizeMatch = text.match(/size=\s*(\d+)kB/);
-      if (sizeMatch) {
-        const sizeKB = parseInt(sizeMatch[1]);
-        // More data = still recording (not silence)
-        if (sizeKB > 10) {
+      // Look for mean_volume in output
+      const volMatch = text.match(/mean_volume:\s*([-\d.]+)\s*dB/);
+      if (volMatch) {
+        const volume = parseFloat(volMatch[1]);
+        // -50dB is a good threshold for speech
+        if (volume > -50) {
+          hasAudioRecently = true;
           silenceStartTime = 0;
-        } else if (silenceStartTime === 0) {
-          silenceStartTime = Date.now();
-        }
-        
-        // Auto-stop after silence timeout
-        if (silenceStartTime > 0 && Date.now() - silenceStartTime > CONFIG.silenceTimeout) {
-          log(`Silence detected, stopping recording...`);
-          proc.kill('SIGTERM');
+        } else if (hasAudioRecently) {
+          if (silenceStartTime === 0) {
+            silenceStartTime = Date.now();
+          }
+          // Auto-stop after 1 second of silence
+          if (silenceStartTime > 0 && Date.now() - silenceStartTime > 1000) {
+            log(`Silence detected (${volume}dB), stopping recording...`);
+            proc.kill('SIGTERM');
+            monitorProc.kill();
+          }
         }
       }
     });
     
-    proc.on('error', e => log(`ffmpeg error: ${e.message}`));
-    proc.on('close', code => {
-      log(`Recording stopped: ${code}`);
+    proc.on('error', e => {
+      log(`ffmpeg error: ${e.message}`);
+      monitorProc.kill();
+    });
+    proc.on('close', () => {
+      monitorProc.kill();
       resolve();
     });
   });
