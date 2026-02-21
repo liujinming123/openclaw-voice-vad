@@ -39,7 +39,7 @@ const CONFIG = {
   maxRecordingTime: 10000,  // max recording time
   
   // Wake word
-  wakeWord: "柳如烟",
+  wakeWord: "你好",
 };
 
 // ============== State ==============
@@ -380,7 +380,7 @@ async function listenOnce(): Promise<void> {
         
         if (text.includes(CONFIG.wakeWord)) {
           log(`Wake word "${CONFIG.wakeWord}" detected!`);
-          await speak("请说");
+          await speak("我在");
           await startDialogue();
         } else {
           log(`Not wake word: ${text}`);
