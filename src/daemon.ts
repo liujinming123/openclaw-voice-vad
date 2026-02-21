@@ -43,10 +43,12 @@ const CONFIG = {
 };
 
 // ============== State ==============
-type State = "idle" | "listening" | "recording" | "processing" | "speaking";
+type State = "idle" | "listening" | "recording" | "processing" | "speaking" | "dialogue";
 let state: State = "idle";
 let token: string | null = null;
 let tokenExpireTime = 0;
+let inDialogueMode = false;  // After first wake word, stay in dialogue mode
+let lastSpeechTime = 0;
 
 // TTS process for interruption
 let ttsProcess: ChildProcess | null = null;
@@ -379,14 +381,30 @@ async function listenForWakeWord(): Promise<void> {
 }
 
 async function listenOnce(): Promise<void> {
-  logState("idle", "listening");
-  state = "listening";
+  // If in dialogue mode, don't wait for wake word - just listen
+  const waitingForWakeWord = !inDialogueMode;
   
-  log("Listening for wake word...");
+  logState("idle", waitingForWakeWord ? "listening" : "dialogue");
+  state = waitingForWakeWord ? "listening" : "dialogue";
+  
+  log(waitingForWakeWord ? "Listening for wake word..." : "Listening in dialogue mode...");
   
   try {
     for await (const isSpeaking of monitorAudioLevel()) {
-      if (state !== "listening") {
+      // Update last speech time
+      if (isSpeaking) {
+        lastSpeechTime = Date.now();
+      }
+      
+      // Check for silence timeout - return to wake word listening
+      if (inDialogueMode && lastSpeechTime > 0 && Date.now() - lastSpeechTime > 10000) {
+        log("Silence timeout, returning to wake word mode");
+        inDialogueMode = false;
+        state = "listening";
+        return;
+      }
+      
+      if (state !== "listening" && state !== "dialogue") {
         await new Promise(r => setTimeout(r, 100));
         continue;
       }
@@ -406,13 +424,19 @@ async function listenOnce(): Promise<void> {
           await fs.unlink(audioPath);
         } catch {}
         
-        if (text.includes(CONFIG.wakeWord)) {
+        // Check for wake word only if not in dialogue mode
+        if (waitingForWakeWord && text.includes(CONFIG.wakeWord)) {
           log(`Wake word "${CONFIG.wakeWord}" detected!`);
+          inDialogueMode = true;  // Enter dialogue mode
           await speak("我在");
           await startDialogue();
+        } else if (!waitingForWakeWord) {
+          // In dialogue mode, just process the input
+          log(`Dialogue input: ${text}`);
+          await processDialogueInput(text);
         } else {
           log(`Not wake word: ${text}`);
-          state = "listening";
+          state = waitingForWakeWord ? "listening" : "dialogue";
         }
       }
     }
@@ -423,92 +447,89 @@ async function listenOnce(): Promise<void> {
 }
 
 /**
- * Dialogue mode with background processing and interrupt support
+ * Process dialogue input without wake word check
  */
-async function startDialogue(): Promise<void> {
-  logState("listening", "recording");
-  
-  // Record user input
-  const audioPath = `/tmp/voice-assistant-dialog-${Date.now()}.wav`;
-  await recordAudio(audioPath, 10000);
-  
-  // Recognize
-  state = "processing";
-  const text = await recognizeAudio(audioPath);
-  
-  try {
-    await fs.unlink(audioPath);
-  } catch {}
-  
+async function processDialogueInput(text: string): Promise<void> {
   if (!text) {
     await speak("没听清楚，请再说一次");
-    state = "listening";
     return;
   }
   
   log(`User said: ${text}`);
+  lastSpeechTime = Date.now();  // Reset silence timer
   
-  // Send to OpenClaw in background and continue monitoring
-  log("Sending to OpenClaw (background)...");
-  const responsePromise = sendToOpenClaw(text);
+  // Send to OpenClaw
+  log("Sending to OpenClaw...");
+  const response = await sendToOpenClaw(text);
+  log(`OpenClaw response: ${response}`);
+  lastSpeechTime = Date.now();  // Reset after response
   
-  // Monitor for interruption while waiting for response
-  state = "speaking";
-  let responseReceived = false;
-  
-  // Poll for response OR interruption
-  while (!responseReceived) {
-    // Check if OpenClaw responded
-    const raceResult = await Promise.race([
-      responsePromise.then(value => ({ type: 'response' as const, value })),
-      new Promise<{ type: 'interrupt' }>(resolve => {
-        // Poll audio every 500ms
-        const checkInterval = setInterval(() => {
-          if (shouldInterrupt) {
-            clearInterval(checkInterval);
-            resolve({ type: 'interrupt' });
-          }
-          if (state === 'listening') {
-            clearInterval(checkInterval);
-            resolve({ type: 'interrupt' });
-          }
-        }, 500);
-      })
-    ]);
-    
-    if (raceResult.type === 'response') {
-      responseReceived = true;
-      const response = raceResult.value;
-      log(`OpenClaw response: ${response}`);
-      
-      // Reset interrupt flag before playing
-      shouldInterrupt = false;
-      
-      // Play TTS (can be interrupted)
-      if (response) {
-        await speak(response);
-      } else {
-        await speak("抱歉，我没有收到回复");
-      }
-    } else {
-      // Interrupted by new speech
-      log("Interrupted by new speech!");
-      interruptTTS();
-      
-      // Start new dialogue
-      await startDialogue();
-      return;
+  // Play TTS
+  if (response) {
+    await speak(response);
+  } else {
+    await speak("抱歉，我没有收到回复");
+  }
+}
+
+/**
+ * Dialogue mode - loops until silence timeout
+ */
+async function startDialogue(): Promise<void> {
+  // Stay in dialogue loop until silence timeout
+  while (inDialogueMode) {
+    // Check silence timeout
+    if (lastSpeechTime > 0 && Date.now() - lastSpeechTime > 10000) {
+      log("Silence timeout, exiting dialogue mode");
+      inDialogueMode = false;
+      break;
     }
     
-    // Check if we should restart listening
-    if (state === 'speaking') {
-      // Continue loop
-    } else if (state === 'listening') {
-      return;
+    logState("dialogue", "recording");
+    state = "recording";
+    
+    // Record user input
+    const audioPath = `/tmp/voice-assistant-dialog-${Date.now()}.wav`;
+    await recordAudio(audioPath, 10000);
+    
+    // Recognize
+    state = "processing";
+    const text = await recognizeAudio(audioPath);
+    
+    try {
+      await fs.unlink(audioPath);
+    } catch {}
+    
+    if (!text) {
+      // No speech detected, check if we should continue
+      if (Date.now() - lastSpeechTime > 10000) {
+        inDialogueMode = false;
+      }
+      continue;
+    }
+    
+    lastSpeechTime = Date.now();
+    log(`User said: ${text}`);
+    
+    // Send to OpenClaw
+    log("Sending to OpenClaw...");
+    const response = await sendToOpenClaw(text);
+    log(`OpenClaw response: ${response}`);
+    lastSpeechTime = Date.now();
+    
+    // Play TTS
+    if (response) {
+      await speak(response);
+    } else {
+      await speak("抱歉，我没有收到回复");
+    }
+    
+    // Check silence after TTS
+    if (Date.now() - lastSpeechTime > 10000) {
+      inDialogueMode = false;
     }
   }
   
-  // Return to listening
   state = "listening";
 }
 
