@@ -36,7 +36,7 @@ const CONFIG = {
   
   // VAD
   silenceTimeout: 1000,  // ms of silence before stopping
-  maxRecordingTime: 5000,  // max recording time
+  maxRecordingTime: 10000,  // max recording time
   
   // Wake word
   wakeWord: "柳如烟",
