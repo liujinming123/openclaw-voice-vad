@@ -241,14 +241,19 @@ async function recognizeAudio(audioPath: string): Promise<string> {
 async function speak(text: string): Promise<void> {
   const tempFile = `/tmp/voice-assistant-tts-${Date.now()}.mp3`;
   
-  // Generate TTS using CLI with timeout
-  try {
-    await execAsync(`npx node-edge-tts -t "${text.replace(/"/g, '\\"')}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`, {
-      timeout: 15000  // 15s timeout
-    });
-  } catch (error: any) {
-    log(`TTS generation failed: ${error.message}`);
-    return; // Skip TTS if failed
+  // Generate TTS using CLI with timeout and proper error handling
+  const ttsPromise = execAsync(
+    `npx node-edge-tts -t "${text.replace(/"/g, '\\"')}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`,
+    { timeout: 20000 }
+  ).catch((error) => {
+    log(`TTS generation error: ${error.message}`);
+    return null;
+  });
+  
+  const ttsResult = await ttsPromise;
+  if (!ttsResult) {
+    log('TTS skipped due to error');
+    return;
   }
   
   // Play with mpv, allow interruption
