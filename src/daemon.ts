@@ -241,16 +241,30 @@ async function recognizeAudio(audioPath: string): Promise<string> {
 async function speak(text: string): Promise<void> {
   const tempFile = `/tmp/voice-assistant-tts-${Date.now()}.mp3`;
   
-  // Generate TTS using exec (like we tested)
+  // Generate TTS - use shell to properly handle errors
   try {
-    const { stdout, stderr } = await execAsync(
-      `npx node-edge-tts -t "${text}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`,
-      { timeout: 15000 }
-    );
-    log(`TTS output: ${stdout}`);
+    await new Promise<void>((resolve, reject) => {
+      const cmd = `npx node-edge-tts -t "${text}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`;
+      
+      exec(cmd, { timeout: 30000 }, (error, stdout, stderr) => {
+        if (error) {
+          log(`TTS error: ${error.message}`);
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
   } catch (error: any) {
-    log(`TTS error: ${error.message}`);
-    if (error.stderr) log(`TTS stderr: ${error.stderr}`);
+    log(`TTS failed: ${error.message}`);
+    return;
+  }
+  
+  // Check if file exists
+  try {
+    await fs.access(tempFile);
+  } catch {
+    log('TTS file not created, skipping');
     return;
   }
   
