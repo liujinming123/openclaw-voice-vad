@@ -241,18 +241,30 @@ async function recognizeAudio(audioPath: string): Promise<string> {
 async function speak(text: string): Promise<void> {
   const tempFile = `/tmp/voice-assistant-tts-${Date.now()}.mp3`;
   
-  // Generate TTS using CLI with timeout and proper error handling
-  const ttsPromise = execAsync(
-    `npx node-edge-tts -t "${text.replace(/"/g, '\\"')}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`,
-    { timeout: 20000 }
-  ).catch((error) => {
-    log(`TTS generation error: ${error.message}`);
-    return null;
+  // Generate TTS with timeout using Promise.race
+  const ttsPromise = new Promise((resolve, reject) => {
+    const proc = spawn('npx', [
+      'node-edge-tts',
+      '-t', text,
+      '-f', tempFile,
+      '-v', 'zh-CN-XiaoxiaoNeural'
+    ]);
+    
+    proc.on('close', code => {
+      if (code === 0) resolve(true);
+      else reject(new Error(`TTS failed with code ${code}`));
+    });
+    
+    proc.on('error', err => reject(err));
   });
   
-  const ttsResult = await ttsPromise;
-  if (!ttsResult) {
-    log('TTS skipped due to error');
+  try {
+    await Promise.race([
+      ttsPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('TTS timeout')), 15000))
+    ]);
+  } catch (error: any) {
+    log(`TTS error: ${error.message}`);
     return;
   }
   
@@ -268,10 +280,7 @@ async function speak(text: string): Promise<void> {
     
     ttsProcess.on('close', async () => {
       ttsProcess = null;
-      // Clean up
-      try {
-        await fs.unlink(tempFile);
-      } catch {}
+      try { await fs.unlink(tempFile); } catch {}
       resolve();
     });
   });
