@@ -244,11 +244,12 @@ async function speak(text: string): Promise<void> {
   // Generate TTS - use shell to properly handle errors
   try {
     await new Promise<void>((resolve, reject) => {
-      const cmd = `npx node-edge-tts -t "${text}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`;
+      // Clean text for TTS: remove newlines and special chars
+      const cleanText = text.replace(/[\n\r]/g, ' ').replace(/"/g, '\\"').substring(0, 500);
+      const cmd = `npx node-edge-tts -t "${cleanText}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`;
       
-      exec(cmd, { timeout: 30000 }, (error, stdout, stderr) => {
+      exec(cmd, { timeout: 30000 }, (error) => {
         if (error) {
-          log(`TTS error: ${error.message}`);
           reject(error);
           return;
         }
@@ -301,14 +302,10 @@ function interruptTTS(): void {
 // ============== OpenClaw API ==============
 async function sendToOpenClaw(text: string): Promise<string> {
   return new Promise((resolve) => {
-    // Use longer timeout and better error handling
     const cmd = `openclaw agent --local --agent main --message "${text}" --json`;
     log(`Sending to OpenClaw: ${text.substring(0, 20)}...`);
     
     exec(cmd, { timeout: 60000 }, (error, stdout, stderr) => {
-      // OpenClaw outputs warnings to stderr, so we check stdout for actual response
-      // Error only means non-zero exit code, but we might still have valid output
-      
       const output = stdout.trim();
       if (!output) {
         log(`OpenClaw error: ${error?.message || 'no output'}`);
@@ -316,22 +313,27 @@ async function sendToOpenClaw(text: string): Promise<string> {
         return;
       }
       
-      log(`OpenClaw raw response: ${output.substring(0, 200)}`);
+      // Find JSON in output (skip plugin logs)
+      const jsonMatch = output.match(/\{[\s\S]*"payloads"[\s\S]*\}/);
+      if (!jsonMatch) {
+        log(`No JSON found in response`);
+        resolve('');
+        return;
+      }
       
       try {
-        const json = JSON.parse(output);
+        const json = JSON.parse(jsonMatch[0]);
         if (json.payloads && json.payloads.length > 0) {
           const reply = json.payloads[0].text || '';
-          log(`OpenClaw response: ${reply.substring(0, 100)}...`);
+          log(`OpenClaw response: ${reply.substring(0, 50)}...`);
           resolve(reply);
         } else {
-          const reply = json.reply || json.message || json.content || '';
-          log(`OpenClaw response (alt): ${reply.substring(0, 100)}...`);
-          resolve(reply);
+          log(`No payloads in response`);
+          resolve('');
         }
       } catch (e) {
         log(`OpenClaw parse error: ${e}`);
-        resolve(output);
+        resolve('');
       }
     });
   });
