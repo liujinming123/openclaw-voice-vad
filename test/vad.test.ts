@@ -1,4 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs/promises';
+
+const execAsync = promisify(exec);
 
 // Mock audio level detection test
 describe('VAD (Voice Activity Detection)', () => {
@@ -9,7 +14,7 @@ describe('VAD (Voice Activity Detection)', () => {
     for (let i = 0; i < samples.length; i++) {
       sum += Math.abs(samples[i]);
     }
-    return sum / samples.length;
+    return samples.length > 0 ? sum / samples.length : 0;
   }
 
   it('should detect speech when audio level > 100', () => {
@@ -43,8 +48,7 @@ describe('VAD (Voice Activity Detection)', () => {
     const emptySamples = new Int16Array(0);
     const level = calculateAudioLevel(emptySamples);
     
-    // Division by zero returns NaN
-    expect(isNaN(level)).toBe(true);
+    expect(level).toBe(0);
   });
 });
 
@@ -74,4 +78,26 @@ describe('TTS text escaping', () => {
     
     expect(escaped).toBe('他说：\\"你好\\"');
   });
+
+  it('should generate TTS audio file', async () => {
+    const outputPath = '/tmp/vitest-tts-test.mp3';
+    
+    // Clean up first
+    try {
+      await fs.unlink(outputPath);
+    } catch {}
+    
+    // Generate TTS
+    await execAsync(
+      `npx node-edge-tts -t "测试" -f "${outputPath}" -v "zh-CN-XiaoxiaoNeural"`,
+      { timeout: 15000 }
+    );
+    
+    // Check file exists
+    const stats = await fs.stat(outputPath);
+    expect(stats.size).toBeGreaterThan(0);
+    
+    // Clean up
+    await fs.unlink(outputPath);
+  }, 20000);
 });
