@@ -7,7 +7,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/daemon.js",
-    "dev": "tsx src/daemon.ts"
+    "dev": "tsx src/daemon.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "axios": "^1.6.0",
@@ -15,7 +17,8 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
     "typescript": "^5.0.0",
-    "tsx": "^4.0.0"
+    "vitest": "^4.0.18"
   }
 }
