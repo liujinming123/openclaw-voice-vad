@@ -306,17 +306,20 @@ async function sendToOpenClaw(text: string): Promise<string> {
     log(`Sending to OpenClaw: ${text.substring(0, 20)}...`);
     
     exec(cmd, { timeout: 60000 }, (error, stdout, stderr) => {
-      if (error) {
-        log(`OpenClaw agent error: ${error.message}`);
-        if (stderr) log(`stderr: ${stderr.substring(0, 200)}`);
+      // OpenClaw outputs warnings to stderr, so we check stdout for actual response
+      // Error only means non-zero exit code, but we might still have valid output
+      
+      const output = stdout.trim();
+      if (!output) {
+        log(`OpenClaw error: ${error?.message || 'no output'}`);
         resolve('');
         return;
       }
       
-      log(`OpenClaw raw response: ${stdout.substring(0, 200)}`);
+      log(`OpenClaw raw response: ${output.substring(0, 200)}`);
       
       try {
-        const json = JSON.parse(stdout);
+        const json = JSON.parse(output);
         if (json.payloads && json.payloads.length > 0) {
           const reply = json.payloads[0].text || '';
           log(`OpenClaw response: ${reply.substring(0, 100)}...`);
@@ -328,7 +331,7 @@ async function sendToOpenClaw(text: string): Promise<string> {
         }
       } catch (e) {
         log(`OpenClaw parse error: ${e}`);
-        resolve(stdout);
+        resolve(output);
       }
     });
   });
