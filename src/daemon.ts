@@ -301,22 +301,33 @@ function interruptTTS(): void {
 // ============== OpenClaw API ==============
 async function sendToOpenClaw(text: string): Promise<string> {
   return new Promise((resolve) => {
-    // Run in background
-    exec(`openclaw agent --local --agent main --message "${text}" --json`, (error, stdout, stderr) => {
+    // Use longer timeout and better error handling
+    const cmd = `openclaw agent --local --agent main --message "${text}" --json`;
+    log(`Sending to OpenClaw: ${text.substring(0, 20)}...`);
+    
+    exec(cmd, { timeout: 60000 }, (error, stdout, stderr) => {
       if (error) {
         log(`OpenClaw agent error: ${error.message}`);
+        if (stderr) log(`stderr: ${stderr.substring(0, 200)}`);
         resolve('');
         return;
       }
       
+      log(`OpenClaw raw response: ${stdout.substring(0, 200)}`);
+      
       try {
         const json = JSON.parse(stdout);
         if (json.payloads && json.payloads.length > 0) {
-          resolve(json.payloads[0].text || '');
+          const reply = json.payloads[0].text || '';
+          log(`OpenClaw response: ${reply.substring(0, 100)}...`);
+          resolve(reply);
         } else {
-          resolve(json.reply || json.message || json.content || stdout);
+          const reply = json.reply || json.message || json.content || '';
+          log(`OpenClaw response (alt): ${reply.substring(0, 100)}...`);
+          resolve(reply);
         }
-      } catch {
+      } catch (e) {
+        log(`OpenClaw parse error: ${e}`);
         resolve(stdout);
       }
     });
