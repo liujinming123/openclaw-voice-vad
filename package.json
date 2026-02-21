@@ -1,18 +1,21 @@
 {
-  "name": "@liujinming/voice-vad",
+  "name": "@liujinming/voice-assistant",
   "version": "1.0.0",
-  "description": "Voice Activity Detection plugin for OpenClaw",
-  "main": "dist/index.js",
+  "description": "Voice Assistant Daemon - Independent voice service for OpenClaw",
+  "main": "dist/daemon.js",
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "node test/vad.test.js"
+    "start": "node dist/daemon.js",
+    "dev": "tsx src/daemon.ts"
   },
   "dependencies": {
-    "webrtc-vad": "^2.0.13"
+    "axios": "^1.6.0",
+    "node-edge-tts": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "tsx": "^4.0.0"
   }
 }

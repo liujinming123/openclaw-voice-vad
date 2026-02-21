@@ -8,5 +8,5 @@
  */
 
 export { createVAD, type VADOptions } from "./vad.js";
-export { AudioRecorder, type RecorderOptions } from "./recorder.js";
+export { AudioRecorder, isAudioAvailable, type RecorderOptions } from "./recorder.js";
 export { isSpeechActive } from "./detector.js";
