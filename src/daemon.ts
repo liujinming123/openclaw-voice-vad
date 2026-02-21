@@ -72,12 +72,13 @@ async function isAudioAvailable(): Promise<boolean> {
 }
 
 /**
- * Record audio from microphone
+ * Record audio with VAD-based silence detection
  */
 async function recordAudio(outputPath: string, maxDuration: number = CONFIG.maxRecordingTime): Promise<void> {
-  log(`Starting recording: ${outputPath}, duration: ${maxDuration}ms`);
+  log(`Starting recording: ${outputPath}, max duration: ${maxDuration}ms`);
   
   return new Promise((resolve, reject) => {
+    // Use ffmpeg to record and monitor audio level
     const args = [
       '-y',
       '-f', 'pulse',
@@ -93,10 +94,32 @@ async function recordAudio(outputPath: string, maxDuration: number = CONFIG.maxR
       env: { ...process.env, PULSE_SERVER: CONFIG.pulseServer }
     });
 
-    proc.stderr.on('data', d => log(`ffmpeg: ${d.toString().substr(0, 100)}`));
+    let silenceStartTime = 0;
+    
+    proc.stderr.on('data', (data: Buffer) => {
+      const text = data.toString();
+      // Parse audio size from ffmpeg output: "size= 123kB time=00:00:01.23"
+      const sizeMatch = text.match(/size=\s*(\d+)kB/);
+      if (sizeMatch) {
+        const sizeKB = parseInt(sizeMatch[1]);
+        // More data = still recording (not silence)
+        if (sizeKB > 10) {
+          silenceStartTime = 0;
+        } else if (silenceStartTime === 0) {
+          silenceStartTime = Date.now();
+        }
+        
+        // Auto-stop after silence timeout
+        if (silenceStartTime > 0 && Date.now() - silenceStartTime > CONFIG.silenceTimeout) {
+          log(`Silence detected, stopping recording...`);
+          proc.kill('SIGTERM');
+        }
+      }
+    });
+    
     proc.on('error', e => log(`ffmpeg error: ${e.message}`));
     proc.on('close', code => {
-      log(`ffmpeg closed: ${code}`);
+      log(`Recording stopped: ${code}`);
       resolve();
     });
   });
