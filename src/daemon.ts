@@ -7,10 +7,10 @@
  * 3. Records audio when voice detected
  * 4. Performs ASR when silence detected
  * 5. Sends to OpenClaw via API when wake word detected
- * 6. Plays TTS response
+ * 6. Plays TTS response (with interrupt support)
  */
 
-import { spawn, exec, execSync } from "node:child_process";
+import { spawn, exec, execSync, ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -43,9 +43,14 @@ const CONFIG = {
 };
 
 // ============== State ==============
-let state: "idle" | "listening" | "recording" | "processing" = "idle";
+type State = "idle" | "listening" | "recording" | "processing" | "speaking";
+let state: State = "idle";
 let token: string | null = null;
 let tokenExpireTime = 0;
+
+// TTS process for interruption
+let ttsProcess: ChildProcess | null = null;
+let shouldInterrupt = false;
 
 // ============== Utils ==============
 function log(msg: string) {
@@ -98,7 +103,7 @@ async function recordAudio(outputPath: string, maxDuration: number = CONFIG.maxR
 }
 
 /**
- * Monitor audio level (simple VAD)
+ * Monitor audio level (simple VAD) - yields continuously
  */
 async function* monitorAudioLevel(): AsyncGenerator<boolean> {
   // Use ffmpeg to pipe audio to stdout, read levels
@@ -133,6 +138,32 @@ async function* monitorAudioLevel(): AsyncGenerator<boolean> {
       yield isSpeaking;
       buffer = Buffer.alloc(0);
     }
+  }
+}
+
+/**
+ * Check audio level once (non-blocking)
+ */
+async function checkAudioLevel(): Promise<boolean> {
+  try {
+    const { stdout } = await execAsync(`ffmpeg -f pulse -i default -ar 8000 -ac 1 -f s16le - -t 1 2>/dev/null | head -c 16000`, {
+      env: { ...process.env, PULSE_SERVER: CONFIG.pulseServer }
+    });
+    
+    if (!stdout || stdout.length < 16000) {
+      return false;
+    }
+    
+    const samples = new Int16Array(Buffer.from(stdout).buffer, 0, 8000);
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) {
+      sum += Math.abs(samples[i]);
+    }
+    const avg = sum / samples.length;
+    
+    return avg > 100;
+  } catch {
+    return false;
   }
 }
 
@@ -204,9 +235,13 @@ async function recognizeAudio(audioPath: string): Promise<string> {
 }
 
 // ============== TTS ==============
+/**
+ * Speak text with interrupt support
+ */
 async function speak(text: string): Promise<void> {
   const tempFile = `/tmp/voice-assistant-tts-${Date.now()}.mp3`;
   
+  // Generate TTS first
   const ttsScript = `
 const { EdgeTTS } = require('node-edge-tts');
 const tts = new EdgeTTS({
@@ -218,55 +253,74 @@ const tts = new EdgeTTS({
 tts.ttsPromise(\`${text.replace(/`/g, '\\`')}\`, '${tempFile}').then(() => process.exit(0)).catch(() => process.exit(1));
 `;
 
-  return new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     const proc = spawn('node', ['-e', ttsScript]);
+    proc.on('close', code => {
+      if (code === 0) resolve();
+      else reject(new Error('TTS generation failed'));
+    });
+  });
+  
+  // Play with mpv, allow interruption
+  return new Promise((resolve) => {
+    ttsProcess = spawn('mpv', [
+      '--audio-device=pulse',
+      '--no-terminal',
+      tempFile
+    ], {
+      env: { ...process.env, PULSE_SERVER: CONFIG.pulseServer }
+    });
+    
+    ttsProcess.on('close', async () => {
+      ttsProcess = null;
+      // Clean up
+      try {
+        await fs.unlink(tempFile);
+      } catch {}
+      resolve();
+    });
+  });
+}
 
-    proc.on('close', async (code) => {
-      if (code === 0) {
-        // Play with mpv using PulseAudio
-        try {
-          await execAsync(`PULSE_SERVER=/mnt/wslg/PulseServer mpv --audio-device=pulse "${tempFile}" 2>/dev/null`);
-        } catch {}
-        // Clean up
-        try {
-          await fs.unlink(tempFile);
-        } catch {}
-        resolve();
-      } else {
-        reject(new Error('TTS failed'));
+/**
+ * Interrupt current TTS playback
+ */
+function interruptTTS(): void {
+  if (ttsProcess) {
+    log("Interrupting TTS...");
+    ttsProcess.kill('SIGTERM');
+    ttsProcess = null;
+    shouldInterrupt = true;
+  }
+}
+
+// ============== OpenClaw API ==============
+async function sendToOpenClaw(text: string): Promise<string> {
+  return new Promise((resolve) => {
+    // Run in background
+    exec(`openclaw agent --local --agent main --message "${text}" --json`, (error, stdout, stderr) => {
+      if (error) {
+        log(`OpenClaw agent error: ${error.message}`);
+        resolve('');
+        return;
+      }
+      
+      try {
+        const json = JSON.parse(stdout);
+        if (json.payloads && json.payloads.length > 0) {
+          resolve(json.payloads[0].text || '');
+        } else {
+          resolve(json.reply || json.message || json.content || stdout);
+        }
+      } catch {
+        resolve(stdout);
       }
     });
   });
 }
 
-// ============== OpenClaw API ==============
-async function sendToOpenClaw(text: string): Promise<string> {
-  try {
-    // Use OpenClaw CLI to talk to the agent
-    const cmd = `openclaw agent --local --agent main --message "${text}" --json`;
-    const result = execSync(cmd, { encoding: 'utf-8' });
-    log(`Agent response: ${result.substring(0, 200)}...`);
-    
-    // Parse JSON response to get the reply text
-    try {
-      const json = JSON.parse(result);
-      // Handle the payloads format
-      if (json.payloads && json.payloads.length > 0) {
-        return json.payloads[0].text || '';
-      }
-      return json.reply || json.message || json.content || '';
-    } catch {
-      return result;
-    }
-  } catch (error: any) {
-    log(`OpenClaw agent error: ${error.message}`);
-    return '';
-  }
-}
-
 // ============== Main Loop ==============
 async function listenForWakeWord(): Promise<void> {
-  // Keep listening in a loop
   while (true) {
     try {
       await listenOnce();
@@ -275,12 +329,6 @@ async function listenForWakeWord(): Promise<void> {
       await new Promise(r => setTimeout(r, 1000));
     }
     
-    // If still in listening state, restart listening
-    if (state === "listening") {
-      log("Restarting listening...");
-    }
-    
-    // Check if we should stop
     if (state === "idle") {
       break;
     }
@@ -295,55 +343,49 @@ async function listenOnce(): Promise<void> {
   
   try {
     for await (const isSpeaking of monitorAudioLevel()) {
-      // Only check for voice when in listening state
       if (state !== "listening") {
-        // If recording/processing, just skip voice detection but don't break
         await new Promise(r => setTimeout(r, 100));
         continue;
       }
       
       if (isSpeaking) {
-        // Voice detected, start recording
         log("Voice detected, starting recording...");
         state = "recording";
         
         const audioPath = `/tmp/voice-assistant-${Date.now()}.wav`;
         await recordAudio(audioPath);
         
-        // Recognize
         state = "processing";
         log("Recognizing...");
         const text = await recognizeAudio(audioPath);
         
-        // Clean up
         try {
           await fs.unlink(audioPath);
         } catch {}
         
         if (text.includes(CONFIG.wakeWord)) {
-          // Wake word detected!
           log(`Wake word "${CONFIG.wakeWord}" detected!`);
           await speak("请说");
           await startDialogue();
         } else {
           log(`Not wake word: ${text}`);
           state = "listening";
-          // Continue the loop to keep listening
         }
       }
     }
-    // If the for-await loop exits (ffmpeg closes), just return
-    // The while loop in listenForWakeWord will restart us
   } catch (error: any) {
     log(`Error in listen loop: ${error.message}`);
     state = "idle";
   }
 }
 
+/**
+ * Dialogue mode with background processing and interrupt support
+ */
 async function startDialogue(): Promise<void> {
   logState("listening", "recording");
   
-  // Record user input (TTS "语音对话开始" already played)
+  // Record user input
   const audioPath = `/tmp/voice-assistant-dialog-${Date.now()}.wav`;
   await recordAudio(audioPath, 10000);
   
@@ -351,7 +393,6 @@ async function startDialogue(): Promise<void> {
   state = "processing";
   const text = await recognizeAudio(audioPath);
   
-  // Clean up
   try {
     await fs.unlink(audioPath);
   } catch {}
@@ -364,20 +405,67 @@ async function startDialogue(): Promise<void> {
   
   log(`User said: ${text}`);
   
-  // Send to OpenClaw and get response
-  log("Sending to OpenClaw...");
-  const response = await sendToOpenClaw(text);
-  log(`OpenClaw response: ${response}`);
+  // Send to OpenClaw in background and continue monitoring
+  log("Sending to OpenClaw (background)...");
+  const responsePromise = sendToOpenClaw(text);
   
-  // Play TTS response
-  if (response) {
-    log("Playing TTS response...");
-    await speak(response);
-  } else {
-    await speak("抱歉，我没有收到回复");
+  // Monitor for interruption while waiting for response
+  state = "speaking";
+  let responseReceived = false;
+  
+  // Poll for response OR interruption
+  while (!responseReceived) {
+    // Check if OpenClaw responded
+    const raceResult = await Promise.race([
+      responsePromise.then(value => ({ type: 'response' as const, value })),
+      new Promise<{ type: 'interrupt' }>(resolve => {
+        // Poll audio every 500ms
+        const checkInterval = setInterval(() => {
+          if (shouldInterrupt) {
+            clearInterval(checkInterval);
+            resolve({ type: 'interrupt' });
+          }
+          if (state === 'listening') {
+            clearInterval(checkInterval);
+            resolve({ type: 'interrupt' });
+          }
+        }, 500);
+      })
+    ]);
+    
+    if (raceResult.type === 'response') {
+      responseReceived = true;
+      const response = raceResult.value;
+      log(`OpenClaw response: ${response}`);
+      
+      // Reset interrupt flag before playing
+      shouldInterrupt = false;
+      
+      // Play TTS (can be interrupted)
+      if (response) {
+        await speak(response);
+      } else {
+        await speak("抱歉，我没有收到回复");
+      }
+    } else {
+      // Interrupted by new speech
+      log("Interrupted by new speech!");
+      interruptTTS();
+      
+      // Start new dialogue
+      await startDialogue();
+      return;
+    }
+    
+    // Check if we should restart listening
+    if (state === 'speaking') {
+      // Continue loop
+    } else if (state === 'listening') {
+      return;
+    }
   }
   
-  // Return to listening state
+  // Return to listening
   state = "listening";
 }
 
@@ -385,7 +473,6 @@ async function startDialogue(): Promise<void> {
 async function main() {
   log("Voice Assistant starting...");
   
-  // Check audio
   const hasAudio = await isAudioAvailable();
   if (!hasAudio) {
     log("ERROR: Audio not available!");
@@ -396,7 +483,6 @@ async function main() {
   log("Audio available!");
   log(`Wake word: ${CONFIG.wakeWord}`);
   
-  // Start listening
   await listenForWakeWord();
 }
 
