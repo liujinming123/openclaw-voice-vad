@@ -241,25 +241,13 @@ async function recognizeAudio(audioPath: string): Promise<string> {
 async function speak(text: string): Promise<void> {
   const tempFile = `/tmp/voice-assistant-tts-${Date.now()}.mp3`;
   
-  // Generate TTS first
-  const ttsScript = `
-const { EdgeTTS } = require('node-edge-tts');
-const tts = new EdgeTTS({
-  voice: 'zh-CN-XiaoxiaoNeural',
-  rate: '+0%',
-  pitch: '+0Hz',
-  outputFormat: 'audio-24khz-48kbitrate-mono-mp3'
-});
-tts.ttsPromise(\`${text.replace(/`/g, '\\`')}\`, '${tempFile}').then(() => process.exit(0)).catch(() => process.exit(1));
-`;
-
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn('node', ['-e', ttsScript]);
-    proc.on('close', code => {
-      if (code === 0) resolve();
-      else reject(new Error('TTS generation failed'));
-    });
-  });
+  // Generate TTS using CLI
+  try {
+    await execAsync(`npx node-edge-tts -t "${text.replace(/"/g, '\\"')}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`);
+  } catch (error: any) {
+    log(`TTS generation failed: ${error.message}`);
+    throw new Error('TTS failed');
+  }
   
   // Play with mpv, allow interruption
   return new Promise((resolve) => {
