@@ -241,30 +241,16 @@ async function recognizeAudio(audioPath: string): Promise<string> {
 async function speak(text: string): Promise<void> {
   const tempFile = `/tmp/voice-assistant-tts-${Date.now()}.mp3`;
   
-  // Generate TTS with timeout using Promise.race
-  const ttsPromise = new Promise((resolve, reject) => {
-    const proc = spawn('npx', [
-      'node-edge-tts',
-      '-t', text,
-      '-f', tempFile,
-      '-v', 'zh-CN-XiaoxiaoNeural'
-    ]);
-    
-    proc.on('close', code => {
-      if (code === 0) resolve(true);
-      else reject(new Error(`TTS failed with code ${code}`));
-    });
-    
-    proc.on('error', err => reject(err));
-  });
-  
+  // Generate TTS using exec (like we tested)
   try {
-    await Promise.race([
-      ttsPromise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('TTS timeout')), 15000))
-    ]);
+    const { stdout, stderr } = await execAsync(
+      `npx node-edge-tts -t "${text}" -f "${tempFile}" -v "zh-CN-XiaoxiaoNeural"`,
+      { timeout: 15000 }
+    );
+    log(`TTS output: ${stdout}`);
   } catch (error: any) {
     log(`TTS error: ${error.message}`);
+    if (error.stderr) log(`TTS stderr: ${error.stderr}`);
     return;
   }
   
