@@ -1,12 +1,10 @@
 /**
- * Voice VAD Plugin for OpenClaw
- * 
- * Features:
- * - Voice Activity Detection using WebRTC VAD
- * - Audio recording with silence detection
- * - Automatic speech capture
+ * OpenClaw Voice VAD - Exports
  */
 
-export { createVAD, type VADOptions } from "./vad.js";
-export { AudioRecorder, isAudioAvailable, type RecorderOptions } from "./recorder.js";
-export { isSpeechActive } from "./detector.js";
+export { AudioCollector } from "./collector.js";
+export { VADProcessor } from "./vad-processor.js";
+export { NetworkSender } from "./network-sender.js";
+export { PipelineDaemon } from "./pipeline-daemon.js";
+export { RingBuffer } from "./queue.js";
+export type { AudioChunk, PipelineStage, PipelineEvent } from "./queue.js";
