@@ -7,7 +7,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/daemon.js",
+    "start:pipeline": "node dist/pipeline-daemon.js",
     "dev": "tsx src/daemon.ts",
+    "dev:pipeline": "tsx src/pipeline-daemon.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -73,6 +73,7 @@ export class VADProcessor extends EventEmitter {
   private process(): void {
     const chunk = this.queue.pop();
     if (!chunk) {
+      // Queue empty
       return;
     }
 
@@ -110,14 +111,16 @@ export class VADProcessor extends EventEmitter {
    * Calculate RMS (Root Mean Square) for audio amplitude
    */
   private calculateRMS(buffer: Buffer): number {
+    if (buffer.length < 2) return 0;
+
     let sum = 0;
-    const samples = buffer.readInt16LE(0);
-    
-    for (let i = 0; i < buffer.length / 2; i++) {
+    const numSamples = buffer.length / 2;
+
+    for (let i = 0; i < numSamples; i++) {
       const sample = buffer.readInt16LE(i * 2);
       sum += sample * sample;
     }
-    
-    return Math.sqrt(sum / (buffer.length / 2));
+
+    return Math.sqrt(sum / numSamples);
   }
 }

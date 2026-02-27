@@ -20,33 +20,32 @@ import path from "node:path";
 
 // Configuration
 const CONFIG = {
-  // OpenClaw API
-  openclawUrl: process.env.OPENCLAW_URL || "http://127.0.0.1:18789",
-  openclawToken: process.env.OPENCLAW_TOKEN || "f3a1ed4004b4d584b7577ac4c5744e912fbca7e30c36c82f",
-  
   // Audio
   pulseServer: "/mnt/wslg/PulseServer",
   sampleRate: 16000,
   channels: 1,
-  
+
   // VAD
-  silenceThreshold: 500,
-  silenceTimeout: 1000,
-  
+  silenceThreshold: 30,
+  silenceTimeout: 1500,
+
   // Queue
   queueCapacity: 100,
-  
+
   // TTS
   ttsVoice: "zh-CN-XiaoxiaoNeural",
 
   // Wake word
   wakeWord: "你好",
   dialogueTimeout: 10000, // 10 seconds of silence to exit dialogue mode
-  
+
   // Baidu ASR
   baiduAppId: "122104542",
   baiduApiKey: "i7BC3svWTUubMKlBWOlH0QGT",
   baiduSecretKey: "3O5ILiZ6xEjNpL9QWXgdeA6IAjojtcc4",
+
+  // OpenClaw Agent
+  agentId: "main",
 };
 
 export class PipelineDaemon extends EventEmitter {
@@ -83,8 +82,7 @@ export class PipelineDaemon extends EventEmitter {
     });
 
     this.networkSender = new NetworkSender({
-      openclawUrl: CONFIG.openclawUrl,
-      openclawToken: CONFIG.openclawToken,
+      agentId: CONFIG.agentId,
       ttsVoice: CONFIG.ttsVoice,
     });
 
@@ -112,6 +110,11 @@ export class PipelineDaemon extends EventEmitter {
 
     this.collector.on("error", (err) => {
       this.log("[Collector] Error:", err.message);
+    });
+
+    // Connect collector to VAD - push audio chunks to shared buffer
+    this.collector.on("audio", (chunk: AudioChunk) => {
+      this.audioBuffer.push(chunk);
     });
 
     // VAD events
@@ -309,3 +312,28 @@ export class PipelineDaemon extends EventEmitter {
     };
   }
 }
+
+// Start the daemon
+const daemon = new PipelineDaemon();
+
+daemon.on("log", (msg: string) => {
+  console.log(msg);
+});
+
+process.on("SIGINT", async () => {
+  console.log("\nReceived SIGINT, stopping...");
+  await daemon.stop();
+  process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+  console.log("\nReceived SIGTERM, stopping...");
+  await daemon.stop();
+  process.exit(0);
+});
+
+// Start
+daemon.start().catch((err) => {
+  console.error("Failed to start daemon:", err);
+  process.exit(1);
+});

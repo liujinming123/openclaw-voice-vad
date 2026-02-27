@@ -1,8 +1,8 @@
 /**
  * Network Sender - Consumer
- * 
+ *
  * Responsible for:
- * 1. Sending audio/text to OpenClaw API
+ * 1. Sending audio/text to OpenClaw API via CLI
  * 2. Receiving AI responses
  * 3. Playing TTS responses
  * Uses async I/O to avoid blocking
@@ -10,26 +10,19 @@
  */
 
 import { EventEmitter } from "node:events";
-import axios from "axios";
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, ChildProcess, exec } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
 
-const execAsync = promisify((await import("node:child_process")).exec);
-
-export interface OpenClawConfig {
-  url: string;
-  token: string;
-}
+const execAsync = promisify(exec);
 
 export interface NetworkSenderOptions {
-  openclawUrl?: string;
-  openclawToken?: string;
+  agentId?: string;
   ttsVoice?: string;
 }
 
 export class NetworkSender extends EventEmitter {
-  private config: OpenClawConfig;
+  private agentId: string;
   private ttsVoice: string;
   private isProcessing: boolean = false;
   private queue: any[] = [];
@@ -39,37 +32,32 @@ export class NetworkSender extends EventEmitter {
 
   constructor(options: NetworkSenderOptions = {}) {
     super();
-    this.config = {
-      url: options.openclawUrl || "http://127.0.0.1:18789",
-      token: options.openclawToken || process.env.OPENCLAW_TOKEN || "",
-    };
+    this.agentId = options.agentId || "main";
     this.ttsVoice = options.ttsVoice || "zh-CN-XiaoxiaoNeural";
   }
 
   /**
-   * Send text to OpenClaw API (async, non-blocking)
+   * Send text to OpenClaw via CLI
    */
   async sendToOpenClaw(text: string): Promise<string> {
     try {
-      const response = await axios.post(
-        `${this.config.url}/api/agent/run`,
-        {
-          message: text,
-          agentId: "main",
-        },
-        {
-          headers: {
-            "Authorization": `Bearer ${this.config.token}`,
-            "Content-Type": "application/json",
-          },
-          timeout: 30000,
-        }
+      // Use openclaw agent CLI command with --local to get direct response
+      const { stdout } = await execAsync(
+        `openclaw agent --agent "${this.agentId}" --message "${text.replace(/"/g, '\\"')}" --local`,
+        { timeout: 60000, encoding: "utf-8" }
       );
 
-      return response.data?.message || response.data?.text || "";
+      // Extract response from stdout
+      // OpenClaw output format may have ANSI codes, strip them
+      const cleanOutput = stdout
+        .replace(/\x1b\[[0-9;]*m/g, "") // Remove ANSI codes
+        .trim();
+
+      return cleanOutput || "抱歉，我没有听明白";
     } catch (error: any) {
       this.emit("error", error);
-      throw error;
+      // Return a fallback response instead of throwing
+      return "抱歉，我暂时无法连接到大脑，请稍后再试";
     }
   }
 
@@ -106,7 +94,7 @@ export class NetworkSender extends EventEmitter {
 
       // Generate TTS audio
       const audioPath = `/tmp/pipeline-tts-${Date.now()}.mp3`;
-      
+
       await execAsync(
         `edge-tts --voice "${this.ttsVoice}" --text "${text.replace(/"/g, '\\"')}" --write-media "${audioPath}"`,
         { timeout: 30000 }
@@ -189,7 +177,7 @@ export class NetworkSender extends EventEmitter {
     }
 
     const request = this.queue.shift();
-    
+
     try {
       // Send to OpenClaw
       this.emit("apiCallStart", { text: request.text });

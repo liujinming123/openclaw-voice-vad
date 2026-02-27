@@ -1,6 +1,6 @@
 /**
  * Audio Collector - Producer
- * 
+ *
  * Responsible for:
  * 1. Continuously capturing raw audio from microphone
  * 2. Putting audio data into thread-safe queue
@@ -19,7 +19,6 @@ export class AudioCollector extends EventEmitter {
   private channels: number;
   private pulseServer: string;
   private chunkSize: number; // bytes per chunk
-  private collectionInterval: NodeJS.Timeout | null = null;
 
   constructor(options: {
     sampleRate?: number;
@@ -33,7 +32,7 @@ export class AudioCollector extends EventEmitter {
     this.channels = options.channels || 1;
     this.pulseServer = options.pulseServer || "/mnt/wslg/PulseServer";
     this.queue = new RingBuffer<AudioChunk>(options.queueCapacity || 100);
-    this.chunkSize = options.chunkSize || 3200; // ~100ms at 16kHz
+    this.chunkSize = options.chunkSize || 3200; // ~100ms at 16kHz mono
   }
 
   /**
@@ -48,16 +47,18 @@ export class AudioCollector extends EventEmitter {
     this.emit("started");
 
     // Start ffmpeg to capture audio
+    // Remove -t 0 as it causes issues with some FFmpeg versions
     this.ffmpeg = spawn("ffmpeg", [
       "-f", "pulse",
       "-i", "default",
       "-ar", String(this.sampleRate),
       "-ac", String(this.channels),
       "-acodec", "pcm_s16le",
-      "-t", "0", // continuous
+      "-f", "s16le",
       "-", // output to stdout
     ], {
-      env: { ...process.env, PULSE_SERVER: this.pulseServer }
+      env: { ...process.env, PULSE_SERVER: this.pulseServer },
+      stdio: ["ignore", "pipe", "pipe"]
     });
 
     let buffer = Buffer.alloc(0);
@@ -67,12 +68,28 @@ export class AudioCollector extends EventEmitter {
 
       buffer = Buffer.concat([buffer, chunk]);
 
-      // Emit raw audio data for VAD processing
-      this.emit("audio", buffer);
+      // Process buffer in chunk-sized pieces
+      while (buffer.length >= this.chunkSize) {
+        const audioChunk: AudioChunk = {
+          data: buffer.subarray(0, this.chunkSize),
+          timestamp: Date.now(),
+          duration: (this.chunkSize / 2) / this.sampleRate * 1000, // ms
+        };
+
+        // Add to queue
+        this.queue.push(audioChunk);
+
+        // Emit for VAD processing
+        this.emit("audio", audioChunk);
+
+        // Remove processed bytes from buffer
+        buffer = buffer.subarray(this.chunkSize);
+      }
     });
 
     this.ffmpeg.stderr?.on("data", (data: Buffer) => {
-      // FFmpeg logs
+      // FFmpeg logs - ignore for now
+      // console.log("[FFmpeg]", data.toString());
     });
 
     this.ffmpeg.on("error", (err) => {
@@ -83,6 +100,7 @@ export class AudioCollector extends EventEmitter {
       if (this.isRunning) {
         this.emit("error", new Error(`FFmpeg exited with code ${code}`));
       }
+      this.isRunning = false;
     });
   }
 
@@ -91,15 +109,10 @@ export class AudioCollector extends EventEmitter {
    */
   stop(): void {
     this.isRunning = false;
-    
-    if (this.ffmpeg) {
-      this.ffmpeg.kill();
-      this.ffmpeg = null;
-    }
 
-    if (this.collectionInterval) {
-      clearInterval(this.collectionInterval);
-      this.collectionInterval = null;
+    if (this.ffmpeg) {
+      this.ffmpeg.kill("SIGTERM");
+      this.ffmpeg = null;
     }
 
     this.emit("stopped");
