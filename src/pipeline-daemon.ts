@@ -27,7 +27,7 @@ const CONFIG = {
 
   // VAD
   silenceThreshold: 30,
-  silenceTimeout: 1500,
+  silenceTimeout: 800,
 
   // Queue
   queueCapacity: 100,
@@ -35,9 +35,8 @@ const CONFIG = {
   // TTS
   ttsVoice: "zh-CN-XiaoxiaoNeural",
 
-  // Wake word
-  wakeWord: "你好",
-  dialogueTimeout: 10000, // 10 seconds of silence to exit dialogue mode
+  // Wake word - empty = no wake word required
+  wakeWord: "",
 
   // Baidu ASR
   baiduAppId: "122104542",
@@ -55,12 +54,9 @@ export class PipelineDaemon extends EventEmitter {
   private asr: BaiduASR;
   private audioBuffer: RingBuffer<AudioChunk>;
   private isRunning: boolean = false;
-  private state: "idle" | "listening" | "recording" | "speaking" | "processing" | "dialogue" = "idle";
+  private state: "idle" | "listening" | "recording" | "speaking" | "processing" = "idle";
   private isRecording: boolean = false;
   private recordedChunks: Buffer[] = [];
-  private inDialogueMode: boolean = false;
-  private lastSpeechTime: number = 0;
-  private dialogueTimeout: NodeJS.Timeout | null = null;
 
   constructor() {
     super();
@@ -118,16 +114,35 @@ export class PipelineDaemon extends EventEmitter {
     });
 
     // VAD events
+    let recordChunkCount = 0;
     this.vadProcessor.on("voiceStart", () => {
       this.log("[VAD] Voice detected - starting recording");
+      
+      // Interrupt current TTS if playing
+      this.networkSender.interrupt();
+      
       this.isRecording = true;
       this.recordedChunks = [];
+      recordChunkCount = 0;
       this.setState("recording");
     });
 
     this.vadProcessor.on("voiceChunk", (chunk: AudioChunk) => {
       if (this.isRecording) {
         this.recordedChunks.push(chunk.data);
+        recordChunkCount++;
+        // Log every 10 chunks (~1 second) during recording
+        if (recordChunkCount % 10 === 0) {
+          // Calculate RMS for logging
+          let sum = 0;
+          const numSamples = chunk.data.length / 2;
+          for (let i = 0; i < numSamples; i++) {
+            const sample = chunk.data.readInt16LE(i * 2);
+            sum += sample * sample;
+          }
+          const rms = Math.sqrt(sum / numSamples);
+          this.log(`[Recording] Chunk ${recordChunkCount}, RMS: ${rms.toFixed(2)}, bytes: ${chunk.data.length}`);
+        }
       }
     });
 
@@ -161,17 +176,6 @@ export class PipelineDaemon extends EventEmitter {
 
     this.networkSender.on("ttsEnd", () => {
       this.log("[Network] TTS complete");
-      
-      // Check if we should exit dialogue mode
-      if (this.inDialogueMode) {
-        const now = Date.now();
-        if (now - this.lastSpeechTime > CONFIG.dialogueTimeout) {
-          this.log("[Dialogue] Timeout - exiting dialogue mode");
-          this.inDialogueMode = false;
-          this.networkSender.playTTS("好的对话结束，有需要再叫我～");
-        }
-      }
-      
       this.setState("listening");
     });
 
@@ -203,29 +207,9 @@ export class PipelineDaemon extends EventEmitter {
         return;
       }
 
-      // Update last speech time for dialogue timeout
-      this.lastSpeechTime = Date.now();
-
-      // Check for wake word
-      if (this.asr.containsWakeWord(text, CONFIG.wakeWord)) {
-        // Wake word detected!
-        this.log("[Wake] Wake word detected!");
-        this.inDialogueMode = true;
-        
-        // Play response
-        this.networkSender.playTTS("我在");
-        
-        // Extract command after wake word
-        const command = this.asr.extractCommand(text, CONFIG.wakeWord);
-        if (command) {
-          this.networkSender.enqueue(command);
-        }
-      } else if (this.inDialogueMode) {
-        // In dialogue mode - send to OpenClaw
-        this.networkSender.enqueue(text);
-      } else {
-        this.log("[Dialogue] Not in dialogue mode, ignoring");
-      }
+      // Send to OpenClaw
+      this.log(`[ASR] Sending to OpenClaw: "${text}"`);
+      this.networkSender.enqueue(text);
 
     } catch (error: any) {
       this.log("[Processing] Error:", error.message);
@@ -235,7 +219,7 @@ export class PipelineDaemon extends EventEmitter {
   /**
    * Set pipeline state
    */
-  private setState(state: "idle" | "listening" | "recording" | "speaking" | "processing" | "dialogue"): void {
+  private setState(state: "idle" | "listening" | "recording" | "speaking" | "processing"): void {
     this.state = state;
     this.log(`[State] ${state}`);
   }
@@ -265,7 +249,13 @@ export class PipelineDaemon extends EventEmitter {
     this.networkSender.start();
 
     this.setState("listening");
-    this.log("[Pipeline] Started successfully - say '你好' to wake me up!");
+    
+    // 根据是否有唤醒词显示不同提示
+    if (CONFIG.wakeWord) {
+      this.log(`[Pipeline] Started successfully - say '${CONFIG.wakeWord}' to wake me up!`);
+    } else {
+      this.log("[Pipeline] Started successfully - I'm listening! (no wake word required)");
+    }
   }
 
   /**
@@ -283,11 +273,6 @@ export class PipelineDaemon extends EventEmitter {
     this.collector.stop();
     this.vadProcessor.stop();
     this.networkSender.stop();
-
-    // Clear dialogue timeout
-    if (this.dialogueTimeout) {
-      clearTimeout(this.dialogueTimeout);
-    }
 
     this.setState("idle");
     this.log("[Pipeline] Stopped");
@@ -307,7 +292,6 @@ export class PipelineDaemon extends EventEmitter {
     return {
       isRunning: this.isRunning,
       state: this.state,
-      inDialogueMode: this.inDialogueMode,
       bufferCount: this.audioBuffer.getCount(),
     };
   }

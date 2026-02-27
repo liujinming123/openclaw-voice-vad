@@ -12,7 +12,6 @@
 import { EventEmitter } from "node:events";
 import { spawn, ChildProcess, exec } from "node:child_process";
 import { promisify } from "node:util";
-import fs from "node:fs/promises";
 
 const execAsync = promisify(exec);
 
@@ -29,6 +28,7 @@ export class NetworkSender extends EventEmitter {
   private processingInterval: NodeJS.Timeout | null = null;
   private currentTTSProcess: ChildProcess | null = null;
   private isPlaying: boolean = false;
+  private isHandlingRequest: boolean = false;  // 标记是否正在处理请求
 
   constructor(options: NetworkSenderOptions = {}) {
     super();
@@ -41,19 +41,31 @@ export class NetworkSender extends EventEmitter {
    */
   async sendToOpenClaw(text: string): Promise<string> {
     try {
-      // Use openclaw agent CLI command with --local to get direct response
+      // Use openclaw agent CLI command (Gateway mode, faster than --local)
       const { stdout } = await execAsync(
-        `openclaw agent --agent "${this.agentId}" --message "${text.replace(/"/g, '\\"')}" --local`,
+        `openclaw agent --agent "${this.agentId}" --message "${text.replace(/"/g, '\\"')}" --json`,
         { timeout: 60000, encoding: "utf-8" }
       );
 
-      // Extract response from stdout
-      // OpenClaw output format may have ANSI codes, strip them
-      const cleanOutput = stdout
-        .replace(/\x1b\[[0-9;]*m/g, "") // Remove ANSI codes
-        .trim();
-
-      return cleanOutput || "抱歉，我没有听明白";
+      // Parse JSON response
+      try {
+        // Remove ANSI codes and extract JSON
+        const cleanOutput = stdout.replace(/\x1b\[[0-9;]*m/g, "").trim();
+        
+        // Find JSON object in output
+        const jsonMatch = cleanOutput.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const json = JSON.parse(jsonMatch[0]);
+          // OpenClaw returns payloads array with text field
+          if (json.payloads && json.payloads.length > 0) {
+            return json.payloads[0].text || "";
+          }
+        }
+        
+        return "抱歉，我没有听明白";
+      } catch (parseError) {
+        return "抱歉，我没有听明白";
+      }
     } catch (error: any) {
       this.emit("error", error);
       // Return a fallback response instead of throwing
@@ -82,32 +94,47 @@ export class NetworkSender extends EventEmitter {
   }
 
   /**
-   * Play TTS using Edge TTS (async, non-blocking)
+   * Play TTS using Edge TTS (流式输出给播放器)
    */
   async playTTS(text: string): Promise<void> {
-    // Interrupt any current playback
-    this.interrupt();
-
     try {
       this.isPlaying = true;
       this.emit("ttsStart");
 
-      // Generate TTS audio
-      const audioPath = `/tmp/pipeline-tts-${Date.now()}.mp3`;
+      // 流式：edge-tts stdout -> mpv stdin
+      const ttsProcess = spawn("edge-tts", [
+        "--voice", this.ttsVoice,
+        "--text", text,
+        "--write-media", "-"  // 输出到 stdout
+      ]);
 
-      await execAsync(
-        `edge-tts --voice "${this.ttsVoice}" --text "${text.replace(/"/g, '\\"')}" --write-media "${audioPath}"`,
-        { timeout: 30000 }
-      );
-
-      // Play using mpv (non-blocking)
-      this.currentTTSProcess = spawn("mpv", [audioPath, "--no-video", "--loop=no"], {
-        stdio: "ignore",
+      // 优化参数，减少延迟
+      const playerProcess = spawn("mpv", [
+        "-",                     // 从 stdin 读取
+        "--no-video",            // 不显示视频
+        "--cache=no",            // 禁用缓存，减少延迟
+        "--audio-buffer=0.2",    // 音频缓冲区缩小到 0.2 秒
+        "--really-quiet",        // 减少不必要的输出
+        "--loop=no"              // 不循环
+      ], {
+        stdio: ["pipe", "ignore", "ignore"]
       });
 
-      // Wait for playback to complete
+      this.currentTTSProcess = playerProcess;
+
+      // pipe TTS 输出给播放器
+      ttsProcess.stdout.pipe(playerProcess.stdin);
+
+      // 处理错误
+      ttsProcess.on("error", (err) => {
+        this.log("[TTS] edge-tts error:", err.message);
+        playerProcess.kill();
+      });
+
+      // 等待播放完成
       await new Promise<void>((resolve) => {
-        this.currentTTSProcess!.on("close", () => {
+        playerProcess.on("close", () => {
+          ttsProcess.kill();
           this.currentTTSProcess = null;
           this.isPlaying = false;
           resolve();
@@ -115,11 +142,6 @@ export class NetworkSender extends EventEmitter {
       });
 
       this.emit("ttsEnd");
-
-      // Clean up
-      try {
-        await fs.unlink(audioPath);
-      } catch {}
 
     } catch (error: any) {
       this.isPlaying = false;
@@ -170,24 +192,43 @@ export class NetworkSender extends EventEmitter {
 
   /**
    * Process queued requests
+   * 如果有多个消息排队，合并成一个发送
    */
   private async processQueue(): Promise<void> {
+    // 如果正在处理上一个请求或播放TTS，跳过
+    if (this.isHandlingRequest || this.isPlaying) {
+      return;
+    }
+
     if (this.queue.length === 0) {
       return;
     }
 
-    const request = this.queue.shift();
+    this.isHandlingRequest = true;
 
     try {
+      // 取出所有排队的消息，合并成一个
+      const messages: string[] = [];
+      while (this.queue.length > 0) {
+        const request = this.queue.shift();
+        messages.push(request.text);
+      }
+
+      // 合并消息（用换行符分隔）
+      const mergedText = messages.join("\n");
+      this.log(`[Queue] Merged ${messages.length} messages`);
+
       // Send to OpenClaw
-      this.emit("apiCallStart", { text: request.text });
-      const response = await this.sendToOpenClaw(request.text);
+      this.emit("apiCallStart", { text: mergedText.substring(0, 50) + "..." });
+      const response = await this.sendToOpenClaw(mergedText);
       this.emit("apiCallEnd", { response });
 
-      // Play TTS (will interrupt if already playing)
+      // Play TTS
       await this.playTTS(response);
     } catch (error: any) {
       this.emit("error", error);
+    } finally {
+      this.isHandlingRequest = false;
     }
   }
 }
