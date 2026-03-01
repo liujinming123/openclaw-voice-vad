@@ -2,21 +2,21 @@
  * Network Sender - Consumer
  *
  * Responsible for:
- * 1. Sending audio/text to OpenClaw API via CLI
+ * 1. Sending audio/text to OpenClaw API via WebSocket
  * 2. Receiving AI responses
  * 3. Playing TTS responses
  * Supports interruption when user speaks
  */
 
 import { EventEmitter } from "node:events";
-import { spawn, ChildProcess, execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { spawn, ChildProcess } from "node:child_process";
+import { OpenClawWsClient } from "./openclaw-ws-client.js";
 
 export interface NetworkSenderOptions {
   agentId?: string;
   ttsVoice?: string;
+  gatewayUrl?: string;
+  gatewayToken?: string;
 }
 
 export class NetworkSender extends EventEmitter {
@@ -27,38 +27,55 @@ export class NetworkSender extends EventEmitter {
   private currentTTSProcess: ChildProcess | null = null;
   private isPlaying: boolean = false;
   private isHandlingRequest: boolean = false;
+  private openclawClient: OpenClawWsClient | null = null;
+  private gatewayUrl: string;
+  private gatewayToken: string;
 
   constructor(options: NetworkSenderOptions = {}) {
     super();
     this.agentId = options.agentId || "main";
     this.ttsVoice = options.ttsVoice || "zh-CN-XiaoxiaoNeural";
+    this.gatewayUrl = options.gatewayUrl || "ws://127.0.0.1:18789";
+    this.gatewayToken = options.gatewayToken || "f3a1ed4004b4d584b7577ac4c5744e912fbca7e30c36c82f";
   }
 
   /**
-   * Send text to OpenClaw via CLI
+   * 初始化 OpenClaw WebSocket 客户端
+   */
+  private async initOpenClawClient(): Promise<void> {
+    if (this.openclawClient && this.openclawClient.IsConnected) {
+      return;
+    }
+    
+    this.log("[OpenClaw] 初始化 WebSocket 客户端...");
+    this.openclawClient = new OpenClawWsClient({
+      url: this.gatewayUrl,
+      token: this.gatewayToken,
+      clientId: 'cli',
+      clientDisplayName: 'Voice Assistant Pipeline',
+      sessionKey: `agent:${this.agentId}:main`
+    });
+    
+    await this.openclawClient.connect();
+    this.log("[OpenClaw] ✅ WebSocket 客户端已连接");
+  }
+
+  /**
+   * Send text to OpenClaw via WebSocket
    */
   async sendToOpenClaw(text: string): Promise<string> {
     try {
       this.log(`[OpenClaw] Calling with: "${text.substring(0, 50)}..."`);
       
-      // Use openclaw CLI instead of WebSocket
-      const { stdout } = await execFileAsync("openclaw", ["ask", text], {
-        timeout: 60000,
-        encoding: "utf-8"
-      });
+      // 确保 WebSocket 客户端已连接
+      await this.initOpenClawClient();
       
-      // Parse response (CLI outputs JSON or plain text)
-      let response = stdout.trim();
-      
-      // Try to parse as JSON if it looks like JSON
-      if (response.startsWith("{") && response.endsWith("}")) {
-        try {
-          const json = JSON.parse(response);
-          response = json.text || json.message || json.response || response;
-        } catch {
-          // Not valid JSON, use as-is
-        }
+      if (!this.openclawClient) {
+        throw new Error('OpenClaw 客户端未初始化');
       }
+      
+      // 使用 WebSocket 发送消息
+      const response = await this.openclawClient.sendAgentMessage(text);
       
       this.log(`[OpenClaw] Response: "${response.substring(0, 100)}..."`);
       return response || "抱歉，我没有听明白";

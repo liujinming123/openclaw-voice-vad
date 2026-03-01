@@ -16,13 +16,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import axios from "axios";
+import { OpenClawWsClient } from "./openclaw-ws-client.js";
 
 const execAsync = promisify(exec);
 
 // ============== Config ==============
 const CONFIG = {
   // OpenClaw API
-  openclawUrl: "http://127.0.0.1:18789",
+  openclawUrl: "ws://127.0.0.1:18789",
   openclawToken: process.env.OPENCLAW_TOKEN || "f3a1ed4004b4d584b7577ac4c5744e912fbca7e30c36c82f",
   
   // Baidu ASR
@@ -49,6 +50,9 @@ let token: string | null = null;
 let tokenExpireTime = 0;
 let inDialogueMode = false;  // After first wake word, stay in dialogue mode
 let lastSpeechTime = 0;
+
+// ============== OpenClaw WebSocket Client ==============
+let openclawClient: OpenClawWsClient | null = null;
 
 // TTS process for interruption
 let ttsProcess: ChildProcess | null = null;
@@ -344,43 +348,44 @@ function interruptTTS(): void {
 }
 
 // ============== OpenClaw API ==============
+async function initOpenClawClient(): Promise<void> {
+  if (openclawClient && openclawClient.IsConnected) {
+    return;
+  }
+  
+  log('初始化 OpenClaw WebSocket 客户端...');
+  openclawClient = new OpenClawWsClient({
+    url: CONFIG.openclawUrl,
+    token: CONFIG.openclawToken,
+    clientId: 'cli',
+    clientDisplayName: 'Voice Assistant',
+    sessionKey: 'agent:main:main'
+  });
+  
+  await openclawClient.connect();
+  log('✅ OpenClaw WebSocket 客户端已连接');
+}
+
 async function sendToOpenClaw(text: string): Promise<string> {
-  return new Promise((resolve) => {
-    const cmd = `openclaw agent --local --agent main --message "${text}" --json`;
+  try {
+    // 确保客户端已连接
+    await initOpenClawClient();
+    
+    if (!openclawClient) {
+      throw new Error('OpenClaw 客户端未初始化');
+    }
+    
     log(`Sending to OpenClaw: ${text.substring(0, 20)}...`);
     
-    exec(cmd, { timeout: 60000 }, (error, stdout, stderr) => {
-      const output = stdout.trim();
-      if (!output) {
-        log(`OpenClaw error: ${error?.message || 'no output'}`);
-        resolve('');
-        return;
-      }
-      
-      // Find JSON in output (skip plugin logs)
-      const jsonMatch = output.match(/\{[\s\S]*"payloads"[\s\S]*\}/);
-      if (!jsonMatch) {
-        log(`No JSON found in response`);
-        resolve('');
-        return;
-      }
-      
-      try {
-        const json = JSON.parse(jsonMatch[0]);
-        if (json.payloads && json.payloads.length > 0) {
-          const reply = json.payloads[0].text || '';
-          log(`OpenClaw response: ${reply.substring(0, 50)}...`);
-          resolve(reply);
-        } else {
-          log(`No payloads in response`);
-          resolve('');
-        }
-      } catch (e) {
-        log(`OpenClaw parse error: ${e}`);
-        resolve('');
-      }
-    });
-  });
+    // 使用 WebSocket 发送消息
+    const reply = await openclawClient.sendAgentMessage(text);
+    log(`OpenClaw response: ${reply.substring(0, 50)}...`);
+    
+    return reply;
+  } catch (error: any) {
+    log(`OpenClaw error: ${error.message}`);
+    return '';
+  }
 }
 
 // ============== Main Loop ==============

@@ -87,6 +87,8 @@ export class PipelineDaemon extends EventEmitter {
     this.networkSender = new NetworkSender({
       agentId: CONFIG.agentId,
       ttsVoice: CONFIG.ttsVoice,
+      gatewayUrl: CONFIG.gatewayUrl,
+      gatewayToken: CONFIG.gatewayToken,
     });
 
     this.asr = new BaiduASR({
