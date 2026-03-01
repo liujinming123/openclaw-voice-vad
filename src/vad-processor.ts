@@ -17,63 +17,25 @@ export interface VADOptions {
 }
 
 export class VADProcessor extends EventEmitter {
-  private queue: RingBuffer<AudioChunk>;
   private isProcessing: boolean = false;
   private isVoiceDetected: boolean = false;
   private silenceDuration: number = 0;
   private silenceThreshold: number;
   private silenceTimeout: number;
   private frameSize: number;
-  private processorInterval: NodeJS.Timeout | null = null;
 
-  constructor(queue: RingBuffer<AudioChunk>, options: VADOptions = {}) {
+  constructor(options: VADOptions = {}) {
     super();
-    this.queue = queue;
-    this.silenceThreshold = options.silenceThreshold || 500;
+    this.silenceThreshold = options.silenceThreshold || 100;
     this.silenceTimeout = options.silenceTimeout || 1000;
     this.frameSize = options.frameSize || 1600; // 100ms at 16kHz
   }
 
   /**
-   * Start VAD processing (consumer)
+   * Process a single audio chunk (event-driven, no polling)
    */
-  start(): void {
-    if (this.isProcessing) {
-      return;
-    }
-
-    this.isProcessing = true;
-    this.emit("started");
-
-    // Process queue at regular intervals
-    this.processorInterval = setInterval(() => {
-      this.process();
-    }, 50); // 20 times per second
-  }
-
-  /**
-   * Stop VAD processing
-   */
-  stop(): void {
-    this.isProcessing = false;
-    
-    if (this.processorInterval) {
-      clearInterval(this.processorInterval);
-      this.processorInterval = null;
-    }
-
-    this.isVoiceDetected = false;
-    this.silenceDuration = 0;
-    this.emit("stopped");
-  }
-
-  /**
-   * Process audio from queue
-   */
-  private process(): void {
-    const chunk = this.queue.pop();
-    if (!chunk) {
-      // Queue empty
+  processChunk(chunk: AudioChunk): void {
+    if (!this.isProcessing) {
       return;
     }
 
@@ -105,6 +67,30 @@ export class VADProcessor extends EventEmitter {
         this.emit("voiceChunk", chunk);
       }
     }
+  }
+
+  /**
+   * Start VAD processing (event-driven, no polling)
+   */
+  start(): void {
+    if (this.isProcessing) {
+      return;
+    }
+
+    this.isProcessing = true;
+    this.isVoiceDetected = false;
+    this.silenceDuration = 0;
+    this.emit("started");
+  }
+
+  /**
+   * Stop VAD processing
+   */
+  stop(): void {
+    this.isProcessing = false;
+    this.isVoiceDetected = false;
+    this.silenceDuration = 0;
+    this.emit("stopped");
   }
 
   /**

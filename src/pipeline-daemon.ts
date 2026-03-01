@@ -26,7 +26,7 @@ const CONFIG = {
   channels: 1,
 
   // VAD
-  silenceThreshold: 30,
+  silenceThreshold: 100,
   silenceTimeout: 800,
 
   // Queue
@@ -45,6 +45,13 @@ const CONFIG = {
 
   // OpenClaw Agent
   agentId: "main",
+
+  // Temp directory for audio files
+  tempDir: "/tmp/openclaw-vad",
+
+  // Gateway WebSocket (for lower latency than CLI)
+  gatewayUrl: "ws://127.0.0.1:18789",
+  gatewayToken: "f3a1ed4004b4d584b7577ac4c5744e912fbca7e30c36c82f",
 };
 
 export class PipelineDaemon extends EventEmitter {
@@ -72,7 +79,7 @@ export class PipelineDaemon extends EventEmitter {
       queueCapacity: CONFIG.queueCapacity,
     });
 
-    this.vadProcessor = new VADProcessor(this.audioBuffer, {
+    this.vadProcessor = new VADProcessor({
       silenceThreshold: CONFIG.silenceThreshold,
       silenceTimeout: CONFIG.silenceTimeout,
     });
@@ -108,9 +115,12 @@ export class PipelineDaemon extends EventEmitter {
       this.log("[Collector] Error:", err.message);
     });
 
-    // Connect collector to VAD - push audio chunks to shared buffer
+    // Connect collector to VAD - push audio chunks via event (no polling)
     this.collector.on("audio", (chunk: AudioChunk) => {
+      // Push to buffer for other consumers
       this.audioBuffer.push(chunk);
+      // Directly process in VAD (event-driven)
+      this.vadProcessor.processChunk(chunk);
     });
 
     // VAD events
@@ -185,22 +195,49 @@ export class PipelineDaemon extends EventEmitter {
   }
 
   /**
+   * Clean up old temp files on startup
+   */
+  private async cleanupTempFiles(): Promise<void> {
+    try {
+      const files = await fs.readdir(CONFIG.tempDir);
+      const now = Date.now();
+      for (const file of files) {
+        if (file.startsWith("pipeline-audio-") && file.endsWith(".wav")) {
+          const filePath = path.join(CONFIG.tempDir, file);
+          const stats = await fs.stat(filePath);
+          // Delete files older than 1 hour
+          if (now - stats.mtimeMs > 3600000) {
+            await fs.unlink(filePath);
+            this.log(`[Cleanup] Removed old temp file: ${file}`);
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err.code !== "ENOENT") {
+        this.log("[Cleanup] Error:", err.message);
+      }
+    }
+  }
+
+  /**
    * Process recorded audio
    */
   private async processRecording(): Promise<void> {
+    let audioPath: string | null = null;
     try {
       // Save audio to temp file
       const audioData = Buffer.concat(this.recordedChunks);
-      const audioPath = `/tmp/pipeline-audio-${Date.now()}.wav`;
+      audioPath = path.join(CONFIG.tempDir, `pipeline-audio-${Date.now()}.wav`);
+      
+      // Ensure temp dir exists
+      await fs.mkdir(CONFIG.tempDir, { recursive: true });
+      
       await fs.writeFile(audioPath, audioData);
       this.log(`[Processing] Audio saved: ${audioPath} (${audioData.length} bytes)`);
 
       // Recognize with Baidu ASR
       const text = await this.asr.recognize(audioPath);
       this.log(`[ASR] Recognized: "${text}"`);
-
-      // Clean up
-      await fs.unlink(audioPath).catch(() => {});
 
       if (!text) {
         this.log("[ASR] No speech recognized");
@@ -213,6 +250,11 @@ export class PipelineDaemon extends EventEmitter {
 
     } catch (error: any) {
       this.log("[Processing] Error:", error.message);
+    } finally {
+      // Always clean up temp file
+      if (audioPath) {
+        await fs.unlink(audioPath).catch(() => {});
+      }
     }
   }
 
@@ -242,6 +284,9 @@ export class PipelineDaemon extends EventEmitter {
 
     this.isRunning = true;
     this.log("[Pipeline] Starting...");
+
+    // Clean up old temp files on startup
+    await this.cleanupTempFiles();
 
     // Start all components
     this.collector.start();
