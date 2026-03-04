@@ -8,9 +8,10 @@ Voice Assistant for OpenClaw - 语音交互服务
 - 🔇 VAD 静音检测自动停止录音
 - 🗣️ 百度 ASR 语音识别
 - 🤖 调用 OpenClaw 获取智能回复
-- 📢 Edge TTS 流式语音合成（低延迟）
+- 📢 Edge TTS 流式语音合成（低延迟，句子级分段播放）
 - 💬 消息队列合并（连续说话自动合并）
 - 🚫 无需唤醒词（免唤醒模式）
+- 🎬 视频播放器（支持空闲/说话双模式切换）
 
 ## Architecture
 
@@ -97,6 +98,11 @@ const CONFIG = {
 
   // OpenClaw
   agentId: "main",
+
+  // Video
+  videoEnabled: true,
+  idleVideo: "/path/to/idle.mp4",
+  speakingVideo: "/path/to/speaking.mp4",
 };
 ```
 

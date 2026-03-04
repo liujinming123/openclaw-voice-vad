@@ -15,6 +15,7 @@ import { VADProcessor } from "./vad-processor.js";
 import { NetworkSender } from "./network-sender.js";
 import { BaiduASR } from "./asr.js";
 import { RingBuffer, AudioChunk } from "./queue.js";
+import { VideoPlayer } from "./video-player.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -52,6 +53,11 @@ const CONFIG = {
   // Gateway WebSocket (for lower latency than CLI)
   gatewayUrl: "ws://127.0.0.1:18789",
   gatewayToken: "f3a1ed4004b4d584b7577ac4c5744e912fbca7e30c36c82f",
+
+  // Video
+  videoEnabled: true,
+  idleVideo: "/path/to/idle.mp4",
+  speakingVideo: "/path/to/speaking.mp4",
 };
 
 export class PipelineDaemon extends EventEmitter {
@@ -59,6 +65,7 @@ export class PipelineDaemon extends EventEmitter {
   private vadProcessor: VADProcessor;
   private networkSender: NetworkSender;
   private asr: BaiduASR;
+  private videoPlayer: VideoPlayer;
   private audioBuffer: RingBuffer<AudioChunk>;
   private isRunning: boolean = false;
   private state: "idle" | "listening" | "recording" | "speaking" | "processing" = "idle";
@@ -95,6 +102,12 @@ export class PipelineDaemon extends EventEmitter {
       appId: CONFIG.baiduAppId,
       apiKey: CONFIG.baiduApiKey,
       secretKey: CONFIG.baiduSecretKey,
+    });
+
+    this.videoPlayer = new VideoPlayer({
+      idleVideo: CONFIG.idleVideo,
+      speakingVideo: CONFIG.speakingVideo,
+      enabled: CONFIG.videoEnabled,
     });
 
     this.setupEventHandlers();
@@ -184,11 +197,13 @@ export class PipelineDaemon extends EventEmitter {
     this.networkSender.on("ttsStart", () => {
       this.log("[Network] Playing TTS...");
       this.setState("speaking");
+      this.videoPlayer.playSpeaking();
     });
 
     this.networkSender.on("ttsEnd", () => {
       this.log("[Network] TTS complete");
       this.setState("listening");
+      this.videoPlayer.playIdle();
     });
 
     this.networkSender.on("error", (err) => {
@@ -294,6 +309,9 @@ export class PipelineDaemon extends EventEmitter {
     this.collector.start();
     this.vadProcessor.start();
     this.networkSender.start();
+    
+    // Start video playback
+    this.videoPlayer.playIdle();
 
     this.setState("listening");
     
@@ -320,6 +338,9 @@ export class PipelineDaemon extends EventEmitter {
     this.collector.stop();
     this.vadProcessor.stop();
     this.networkSender.stop();
+    
+    // Stop video playback
+    this.videoPlayer.stop();
 
     this.setState("idle");
     this.log("[Pipeline] Stopped");
@@ -340,7 +361,37 @@ export class PipelineDaemon extends EventEmitter {
       isRunning: this.isRunning,
       state: this.state,
       bufferCount: this.audioBuffer.getCount(),
+      videoEnabled: this.videoPlayer.isEnabled(),
+      currentVideo: this.videoPlayer.getCurrentVideo(),
     };
+  }
+
+  /**
+   * Enable video playback
+   */
+  enableVideo(): void {
+    this.videoPlayer.enable();
+  }
+
+  /**
+   * Disable video playback
+   */
+  disableVideo(): void {
+    this.videoPlayer.disable();
+  }
+
+  /**
+   * Toggle video playback
+   */
+  toggleVideo(): boolean {
+    return this.videoPlayer.toggle();
+  }
+
+  /**
+   * Check if video is enabled
+   */
+  isVideoEnabled(): boolean {
+    return this.videoPlayer.isEnabled();
   }
 }
 

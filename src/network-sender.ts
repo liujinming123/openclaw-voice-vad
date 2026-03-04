@@ -30,6 +30,8 @@ export class NetworkSender extends EventEmitter {
   private openclawClient: OpenClawWsClient | null = null;
   private gatewayUrl: string;
   private gatewayToken: string;
+  private ttsQueue: string[] = [];
+  private isProcessingTTS: boolean = false;
 
   constructor(options: NetworkSenderOptions = {}) {
     super();
@@ -61,7 +63,7 @@ export class NetworkSender extends EventEmitter {
   }
 
   /**
-   * Send text to OpenClaw via WebSocket
+   * Send text to OpenClaw via WebSocket (流式接收)
    */
   async sendToOpenClaw(text: string): Promise<string> {
     try {
@@ -74,10 +76,27 @@ export class NetworkSender extends EventEmitter {
         throw new Error('OpenClaw 客户端未初始化');
       }
       
-      // 使用 WebSocket 发送消息
-      const response = await this.openclawClient.sendAgentMessage(text);
+      // 重置 TTS 队列状态
+      this.ttsQueue = [];
+      this.isProcessingTTS = false;
       
-      this.log(`[OpenClaw] Response: "${response.substring(0, 100)}..."`);
+      // 使用 WebSocket 发送消息，流式接收文本片段
+      const response = await this.openclawClient.sendAgentMessage(text, (chunk, isFinal) => {
+        this.log(`[OpenClaw] 收到文本片段: "${chunk.substring(0, 50)}..." (isFinal: ${isFinal})`);
+        
+        // 简单的句子分割：按标点符号分段
+        const segments = this.splitIntoSentences(chunk);
+        for (const segment of segments) {
+          if (segment.trim()) {
+            this.ttsQueue.push(segment);
+          }
+        }
+        
+        // 开始处理 TTS 队列
+        this.processTTSQueue();
+      });
+      
+      this.log(`[OpenClaw] 完整响应: "${response.substring(0, 100)}..."`);
       return response || "抱歉，我没有听明白";
       
     } catch (error: any) {
@@ -88,9 +107,61 @@ export class NetworkSender extends EventEmitter {
   }
 
   /**
+   * 将文本分割成句子（简单版本）
+   */
+  private splitIntoSentences(text: string): string[] {
+    // 按常见标点符号分割
+    const separators = ['。', '！', '？', '.', '!', '?', '\n'];
+    let sentences: string[] = [];
+    let current = '';
+    
+    for (const char of text) {
+      current += char;
+      if (separators.includes(char)) {
+        sentences.push(current);
+        current = '';
+      }
+    }
+    
+    if (current.trim()) {
+      sentences.push(current);
+    }
+    
+    return sentences;
+  }
+
+  /**
+   * 处理 TTS 队列
+   */
+  private async processTTSQueue(): Promise<void> {
+    if (this.isProcessingTTS || this.ttsQueue.length === 0) {
+      return;
+    }
+    
+    this.isProcessingTTS = true;
+    
+    while (this.ttsQueue.length > 0) {
+      const text = this.ttsQueue.shift();
+      if (text && text.trim()) {
+        try {
+          await this.playTTS(text);
+        } catch (error: any) {
+          this.log("[TTS] 播放错误:", error.message);
+        }
+      }
+    }
+    
+    this.isProcessingTTS = false;
+  }
+
+  /**
    * Interrupt current TTS playback
    */
   interrupt(): void {
+    // 清空 TTS 队列
+    this.ttsQueue = [];
+    this.isProcessingTTS = false;
+    
     if (this.currentTTSProcess) {
       this.log("[TTS] Interrupting current playback...");
       this.currentTTSProcess.kill();

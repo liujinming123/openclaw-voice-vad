@@ -28,6 +28,8 @@ export class OpenClawWsClient {
   private currentAssistantText: string = '';
   private currentThinkingText: string = '';
   private agentResponseResolve: ((text: string) => void) | null = null;
+  private onTextChunk?: (text: string, isFinal: boolean) => void;
+  private lastSentTextLength: number = 0;
   
   constructor(config: OpenClawWsConfig) {
     this.config = {
@@ -111,6 +113,13 @@ export class OpenClawWsClient {
         this.currentThinkingText = text;
       } else if (stream === 'assistant') {
         this.currentAssistantText = text;
+        
+        // 检查是否有新的文本片段可以发送
+        if (this.onTextChunk && text.length > this.lastSentTextLength) {
+          const newText = text.substring(this.lastSentTextLength);
+          this.lastSentTextLength = text.length;
+          this.onTextChunk(newText, false);
+        }
       }
     }
 
@@ -194,13 +203,15 @@ export class OpenClawWsClient {
   }
 
   /**
-   * 发送 agent 消息并等待回复
+   * 发送 agent 消息并等待回复（支持流式回调）
    */
-  async sendAgentMessage(message: string): Promise<string> {
+  async sendAgentMessage(message: string, onTextChunk?: (text: string, isFinal: boolean) => void): Promise<string> {
     // 重置状态
     this.currentAssistantText = '';
     this.currentThinkingText = '';
     this.currentRunId = null;
+    this.onTextChunk = onTextChunk;
+    this.lastSentTextLength = 0;
     
     const idempotencyKey = `voice-${Date.now()}`;
     
@@ -222,6 +233,15 @@ export class OpenClawWsClient {
 
     // 等一下让事件推送完成
     await new Promise(r => setTimeout(r, 300));
+    
+    // 发送最终回调
+    if (this.onTextChunk && this.currentAssistantText.length > this.lastSentTextLength) {
+      const newText = this.currentAssistantText.substring(this.lastSentTextLength);
+      this.onTextChunk(newText, true);
+    }
+    
+    // 清理回调
+    this.onTextChunk = undefined;
     
     // 返回最终的 assistant 文本
     return this.currentAssistantText || '(没有收到回复)';
